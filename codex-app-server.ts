@@ -58,7 +58,16 @@ type JsonRpcMessage = {
 type CodexModelInfo = {
 	id: string;
 	displayName: string;
-	reasoning: boolean;
+	supportedReasoningEfforts: string[];
+	contextWindow: number;
+	input: ("text" | "image")[];
+};
+
+type CodexModelVariant = {
+	id: string;
+	modelId: string;
+	displayName: string;
+	effort: string | null;
 	contextWindow: number;
 	input: ("text" | "image")[];
 };
@@ -298,6 +307,7 @@ class CodexBridge {
 	private server: CodexAppServer | null = null;
 	private threadId: string | null = null;
 	private currentModelId: string | null = null;
+	private currentEffort: string | null = null;
 	private activeTurnId: string | null = null;
 	private cwd: string | null = null;
 	private piSessionKey: string | null = null;
@@ -364,6 +374,7 @@ class CodexBridge {
 	async prompt(
 		context: Context,
 		modelId: string,
+		effort: string | null,
 		piSessionKey: string,
 		cwd: string,
 		onEvent: (message: JsonRpcMessage) => void,
@@ -418,7 +429,12 @@ class CodexBridge {
 						threadId,
 						input: [{ type: "text", text }],
 						model: modelId,
+						effort,
 						approvalPolicy: APPROVAL_POLICY,
+					})
+					.then(() => {
+						this.currentModelId = modelId;
+						this.currentEffort = effort;
 					})
 					.catch(fail);
 			});
@@ -430,6 +446,7 @@ class CodexBridge {
 			connected: this.server != null && !this.server.isClosed(),
 			threadId: this.threadId,
 			currentModelId: this.currentModelId,
+			currentEffort: this.currentEffort,
 			sentMessageCount: this.sentMessageCount,
 			piSessionKey: this.piSessionKey,
 			cwd: this.cwd,
@@ -441,6 +458,7 @@ class CodexBridge {
 		this.server = null;
 		this.threadId = null;
 		this.currentModelId = null;
+		this.currentEffort = null;
 		this.activeTurnId = null;
 		this.cwd = null;
 		this.piSessionKey = null;
@@ -449,7 +467,7 @@ class CodexBridge {
 }
 
 const bridge = new CodexBridge();
-const modelCatalog = new Map<string, CodexModelInfo>();
+const modelCatalog = new Map<string, CodexModelVariant>();
 
 let boundPiSessionKey: string | undefined;
 let boundCwd = process.cwd();
@@ -465,7 +483,13 @@ async function discoverCodexModels(): Promise<CodexModelInfo[]> {
 			.map((m: any) => ({
 				id: m.id ?? m.model,
 				displayName: m.displayName ?? m.id ?? m.model,
-				reasoning: Array.isArray(m.supportedReasoningEfforts) && m.supportedReasoningEfforts.length > 0,
+				supportedReasoningEfforts: Array.isArray(m.supportedReasoningEfforts)
+					? m.supportedReasoningEfforts
+							.map((option: any) =>
+								typeof option === "string" ? option : option?.reasoningEffort,
+							)
+							.filter((effort: unknown): effort is string => typeof effort === "string" && effort.length > 0)
+					: [],
 				contextWindow: Number(m.contextWindow ?? 256_000),
 				input: Array.isArray(m.inputModalities)
 					? (m.inputModalities.filter((i: string) => i === "text" || i === "image") as ("text" | "image")[])
@@ -476,6 +500,37 @@ async function discoverCodexModels(): Promise<CodexModelInfo[]> {
 	} finally {
 		server.dispose();
 	}
+}
+
+function virtualModelBaseId(modelId: string): string {
+	const match = /^gpt-(\d+(?:\.\d+)*)(?:-(.+))?$/.exec(modelId);
+	if (!match?.[2]) return modelId;
+	return `gpt-${match[2]}-${match[1]}`;
+}
+
+function createModelVariants(models: CodexModelInfo[]): CodexModelVariant[] {
+	const variants = models.flatMap((model) => {
+		if (model.supportedReasoningEfforts.length === 0) {
+			return [{ ...model, modelId: model.id, effort: null }];
+		}
+
+		const baseId = virtualModelBaseId(model.id);
+		return model.supportedReasoningEfforts.map((effort) => ({
+			id: `${baseId}-${effort}`,
+			modelId: model.id,
+			displayName: `${model.displayName} (${effort})`,
+			effort,
+			contextWindow: model.contextWindow,
+			input: model.input,
+		}));
+	});
+
+	const ids = new Set<string>();
+	for (const variant of variants) {
+		if (ids.has(variant.id)) throw new Error(`Duplicate virtual Codex model id: ${variant.id}`);
+		ids.add(variant.id);
+	}
+	return variants;
 }
 
 function streamCodexProvider(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
@@ -565,10 +620,19 @@ function streamCodexProvider(model: Model<any>, context: Context, options?: Simp
 		};
 
 		try {
-			if (!modelCatalog.has(model.id)) throw new Error(`Unknown codex model id: ${model.id}`);
+			const variant = modelCatalog.get(model.id);
+			if (!variant) throw new Error(`Unknown virtual Codex model id: ${model.id}`);
 			stream.push({ type: "start", partial: output });
 			const piSessionKey = boundPiSessionKey ?? `ephemeral:${boundCwd}`;
-			const result = await bridge.prompt(context, model.id, piSessionKey, boundCwd, onEvent, options?.signal);
+			const result = await bridge.prompt(
+				context,
+				variant.modelId,
+				variant.effort,
+				piSessionKey,
+				boundCwd,
+				onEvent,
+				options?.signal,
+			);
 			output.stopReason = result.stopReason as "stop" | "aborted";
 
 			endThinking();
@@ -605,12 +669,13 @@ export default async function codexAppServerExtension(pi: ExtensionAPI) {
 			`[codex-app-server] failed to discover Codex models: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
-	for (const m of models) modelCatalog.set(m.id, m);
-
 	if (models.length === 0) {
 		console.error("[codex-app-server] no Codex models discovered; provider not registered.");
 		return;
 	}
+
+	const variants = createModelVariants(models);
+	for (const variant of variants) modelCatalog.set(variant.id, variant);
 
 	pi.registerProvider(PROVIDER, {
 		name: "Codex (app-server)",
@@ -618,13 +683,14 @@ export default async function codexAppServerExtension(pi: ExtensionAPI) {
 		apiKey: "codex-app-server",
 		api: API,
 		streamSimple: streamCodexProvider,
-		models: models.map((m) => ({
-			id: m.id,
-			// Surfaced in the /model picker as e.g. "GPT-5.4 [codex-app-server]".
-			name: `${m.displayName} [codex-app-server]`,
-			reasoning: m.reasoning,
-			input: m.input,
-			contextWindow: m.contextWindow,
+		models: variants.map((variant) => ({
+			id: variant.id,
+			name: `${variant.displayName} [codex-app-server]`,
+			// Effort is fixed by the virtual model; Pi's separate thinking selector
+			// must not override it.
+			reasoning: false,
+			input: variant.input,
+			contextWindow: variant.contextWindow,
 			maxTokens: 32_768,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
@@ -651,10 +717,12 @@ export default async function codexAppServerExtension(pi: ExtensionAPI) {
 				`connected: ${s.connected ? "yes" : "no"}`,
 				`thread: ${s.threadId ?? "(none)"}`,
 				`current model: ${s.currentModelId ?? "(none)"}`,
+				`current effort: ${s.currentEffort ?? "(default)"}`,
 				`messages sent: ${s.sentMessageCount}`,
 				`approval policy: ${APPROVAL_POLICY}`,
 				`sandbox: ${SANDBOX_MODE}`,
-				`available models: ${models.length}`,
+				`source models: ${models.length}`,
+				`virtual models: ${variants.length}`,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
