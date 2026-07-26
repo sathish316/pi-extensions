@@ -43,13 +43,24 @@ const PROVIDER_CONFIG_KEYS: Record<AcpProvider, string> = {
 	rovo: "enable_rovo_acp_models",
 };
 
-/** Per-provider environment overrides. */
+/** Per-provider environment overrides that force a provider on. */
 const PROVIDER_ENV_KEYS: Record<AcpProvider, string> = {
 	cursor: "ENABLE_CURSOR_ACP",
 	codex: "ENABLE_CODEX_ACP",
 	claude: "ENABLE_CLAUDE_ACP",
 	rovo: "ENABLE_ROVO_ACP",
 };
+
+/** Per-provider environment overrides that force a provider off. */
+const PROVIDER_DISABLE_ENV_KEYS: Record<AcpProvider, string> = {
+	cursor: "DISABLE_CURSOR_ACP",
+	codex: "DISABLE_CODEX_ACP",
+	claude: "DISABLE_CLAUDE_ACP",
+	rovo: "DISABLE_ROVO_ACP",
+};
+
+/** Kill switch that forces every provider off, whatever else is set. */
+const DISABLE_ALL_ENV_KEY = "DISABLE_ALL_ACP_MODELS";
 
 const CONFIG_FILE_NAME = "acp-config.json";
 const MASTER_KEY = "enable_acp_models";
@@ -212,15 +223,36 @@ function readEnvToggle(name: string): boolean | undefined {
  * Resolve whether one provider should load.
  *
  * Precedence, highest first:
- *   1. ENABLE_<PROVIDER>_ACP env var (force enable, or force disable on 0/false)
- *   2. enable_acp_models: false        -> nothing loads
- *   3. enable_all_acp_models: true     -> everything loads
- *   4. enable_<provider>_acp_models    -> that provider only
- *   5. no per-provider key set anywhere -> everything loads (back-compat)
+ *   1. DISABLE_ALL_ACP_MODELS         -> nothing loads, beats every enable
+ *   2. DISABLE_<PROVIDER>_ACP         -> that provider off, beats its ENABLE
+ *   3. ENABLE_<PROVIDER>_ACP          -> force enable (or force off on 0/false)
+ *   4. enable_acp_models: false       -> nothing loads
+ *   5. enable_all_acp_models: true    -> everything loads
+ *   6. enable_<provider>_acp_models   -> that provider only
+ *   7. no per-provider key set anywhere -> everything loads (back-compat)
  *      at least one per-provider key set -> unset providers stay off
+ *
+ * Disable always beats enable: a kill switch that something else could override
+ * is not a kill switch. Setting a DISABLE var to "0"/"false" doesn't force the
+ * provider on, it just stops disabling — the lower rules then decide.
  */
 export function decideAcpProvider(provider: AcpProvider, config = readAcpConfigFile()): AcpDecision {
 	const label = PROVIDER_LABELS[provider];
+
+	if (readEnvToggle(DISABLE_ALL_ENV_KEY) === true) {
+		return {
+			provider,
+			label,
+			enabled: false,
+			reason: `${DISABLE_ALL_ENV_KEY}=${process.env[DISABLE_ALL_ENV_KEY]}`,
+		};
+	}
+
+	const disableKey = PROVIDER_DISABLE_ENV_KEYS[provider];
+	if (readEnvToggle(disableKey) === true) {
+		return { provider, label, enabled: false, reason: `${disableKey}=${process.env[disableKey]}` };
+	}
+
 	const envKey = PROVIDER_ENV_KEYS[provider];
 	const envValue = readEnvToggle(envKey);
 	if (envValue !== undefined) {
@@ -394,8 +426,9 @@ export function formatAcpConfigReport(records: Map<AcpProvider, LoadRecord>): st
 	}
 	const totalMs = [...records.values()].reduce((sum, r) => sum + r.ms, 0);
 	lines.push(`Time taken for loading ACP models: ${seconds(totalMs)}`);
-	lines.push(
-		`env overrides: ${ACP_PROVIDERS.map((p) => `${PROVIDER_ENV_KEYS[p]}=${process.env[PROVIDER_ENV_KEYS[p]] ?? "(unset)"}`).join(", ")}`,
-	);
+	const envValue = (name: string) => `${name}=${process.env[name] ?? "(unset)"}`;
+	lines.push(`kill switch: ${envValue(DISABLE_ALL_ENV_KEY)}`);
+	lines.push(`enable overrides: ${ACP_PROVIDERS.map((p) => envValue(PROVIDER_ENV_KEYS[p])).join(", ")}`);
+	lines.push(`disable overrides: ${ACP_PROVIDERS.map((p) => envValue(PROVIDER_DISABLE_ENV_KEYS[p])).join(", ")}`);
 	return lines.join("\n");
 }

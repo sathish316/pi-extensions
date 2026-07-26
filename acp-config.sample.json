@@ -29,12 +29,20 @@
   //
   //   { "enable_acp_models": false }
   //
-  // Env overrides beat everything above, one variable per provider:
+  // Env overrides beat everything above. Force a provider ON:
   //   ENABLE_CURSOR_ACP  ENABLE_CODEX_ACP  ENABLE_CLAUDE_ACP  ENABLE_ROVO_ACP
-  // Any value other than "0" or "false" force-enables that provider even when
-  // it is disabled here; "0" or "false" force-disables it.
+  // Force a provider OFF:
+  //   DISABLE_CURSOR_ACP  DISABLE_CODEX_ACP  DISABLE_CLAUDE_ACP  DISABLE_ROVO_ACP
+  // Force everything OFF:
+  //   DISABLE_ALL_ACP_MODELS
   //
-  //   ENABLE_CODEX_ACP=1 pi     # load Codex models even with everything off
+  // Any value other than "0" or "false" activates the variable; unset or empty
+  // defers to the next rule. Disable beats enable, so DISABLE_ALL_ACP_MODELS
+  // wins even alongside an ENABLE_* var. A DISABLE_* set to "0" doesn't force a
+  // provider on — it just stops disabling.
+  //
+  //   ENABLE_CODEX_ACP=1 pi        # load Codex models even with everything off
+  //   DISABLE_ALL_ACP_MODELS=1 pi  # load nothing, whatever this file says
   //
   // Run /acp-config inside Pi to see what was resolved and what it cost.
 }

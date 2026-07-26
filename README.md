@@ -119,11 +119,13 @@ to read it from somewhere else. Line and block comments are allowed.
 
 Precedence, highest first:
 
-1. `ENABLE_<PROVIDER>_ACP` environment variable (see below).
-2. `enable_acp_models: false` — nothing loads.
-3. `enable_all_acp_models: true` — everything loads.
-4. The matching `enable_<provider>_acp_models` key.
-5. Nothing set: if **none** of the four per-provider keys are present, all four
+1. `DISABLE_ALL_ACP_MODELS` — kill switch, nothing loads.
+2. `DISABLE_<PROVIDER>_ACP` — that provider off.
+3. `ENABLE_<PROVIDER>_ACP` — that provider on.
+4. `enable_acp_models: false` — nothing loads.
+5. `enable_all_acp_models: true` — everything loads.
+6. The matching `enable_<provider>_acp_models` key.
+7. Nothing set: if **none** of the four per-provider keys are present, all four
    load (the behaviour from before this config existed). As soon as **at least
    one** is present, the ones you left out stay off.
 
@@ -138,18 +140,32 @@ a typo never silently costs you your models.
 
 ### Environment overrides
 
-One variable per provider, checked before anything in the file:
+Two variables per provider, both checked before anything in the file:
 
-| Variable | Provider |
-| --- | --- |
-| `ENABLE_CURSOR_ACP` | `cursor-acp` |
-| `ENABLE_CODEX_ACP` | `codex-app-server` |
-| `ENABLE_CLAUDE_ACP` | `claude-code-acp` |
-| `ENABLE_ROVO_ACP` | `rovo-acp` |
+| Provider | Force on | Force off |
+| --- | --- | --- |
+| `cursor-acp` | `ENABLE_CURSOR_ACP` | `DISABLE_CURSOR_ACP` |
+| `codex-app-server` | `ENABLE_CODEX_ACP` | `DISABLE_CODEX_ACP` |
+| `claude-code-acp` | `ENABLE_CLAUDE_ACP` | `DISABLE_CLAUDE_ACP` |
+| `rovo-acp` | `ENABLE_ROVO_ACP` | `DISABLE_ROVO_ACP` |
 
-Any value other than `0` or `false` force-enables that provider **even when the
-config file disabled it**. `0` or `false` force-disables it. Unset or empty means
-"defer to the config file".
+Plus `DISABLE_ALL_ACP_MODELS`, a kill switch that turns off every provider.
+
+For all of these, any value other than `0` or `false` activates the variable;
+unset or empty means "ignore me and defer to the next rule". So an
+`ENABLE_*` force-enables a provider **even when the config file disabled it**,
+and a `DISABLE_*` force-disables it **even when the config file or an
+`ENABLE_*` enabled it**.
+
+**Disable beats enable.** A kill switch something else could override wouldn't
+be a kill switch, so `DISABLE_ALL_ACP_MODELS=1` wins even alongside
+`ENABLE_CODEX_ACP=1`. Setting a `DISABLE_*` var to `0` or `false` does not force
+a provider on — it just stops disabling, and the lower rules decide.
+
+```bash
+DISABLE_ALL_ACP_MODELS=1 pi   # ~1s, no ACP models regardless of config
+DISABLE_CURSOR_ACP=1 pi       # everything the config enables, minus Cursor
+```
 
 This is the fast setup: turn everything off by default, then opt in per shell.
 
