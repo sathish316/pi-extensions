@@ -1,2 +1,5 @@
 node_modules/
 .idea
+
+# Local ACP provider toggles. Copy acp-config.sample.json to get started.
+acp-config.json

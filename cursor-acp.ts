@@ -10,6 +10,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { acpProviderGate } from "./acp-lib/config.ts";
 
 const PROVIDER = "cursor-acp";
 const API = "cursor-acp";
@@ -660,6 +661,9 @@ function streamCursorProvider(model: Model<any>, context: Context, options?: Sim
 }
 
 export default async function cursorAcpExtension(pi: ExtensionAPI) {
+	const gate = acpProviderGate(pi, "cursor");
+	if (!gate.enabled) return;
+
 	let models: CursorModelInfo[];
 	try {
 		models = await discoverCursorModels();
@@ -687,6 +691,7 @@ export default async function cursorAcpExtension(pi: ExtensionAPI) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 	});
+	gate.loaded(models.length);
 
 	pi.on("session_start", async (_event, ctx) => {
 		boundPiSessionKey = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();

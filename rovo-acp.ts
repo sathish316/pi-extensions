@@ -10,6 +10,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { acpProviderGate } from "./acp-lib/config.ts";
 
 const PROVIDER = "rovo-acp";
 const API = "rovo-acp";
@@ -697,6 +698,9 @@ function streamRovoProvider(model: Model<any>, context: Context, options?: Simpl
 }
 
 export default async function rovoAcpExtension(pi: ExtensionAPI) {
+	const gate = acpProviderGate(pi, "rovo");
+	if (!gate.enabled) return;
+
 	let models: RovoModelInfo[];
 	try {
 		models = await discoverRovoModels();
@@ -724,6 +728,7 @@ export default async function rovoAcpExtension(pi: ExtensionAPI) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 	});
+	gate.loaded(models.length);
 
 	pi.on("session_start", async (_event, ctx) => {
 		boundPiSessionKey = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();

@@ -1,0 +1,40 @@
+// Copy this file to acp-config.json (same directory) and edit it:
+//
+//   cp acp-config.sample.json acp-config.json
+//
+// Without acp-config.json, all four ACP providers load — the original
+// behaviour. Line and block comments are allowed in acp-config.json too.
+{
+  // Master switch. false disables every ACP provider, so Pi starts without
+  // spawning any agent CLI. Env toggles can still re-enable individual ones.
+  "enable_acp_models": true,
+
+  // true enables cursor + codex + claude + rovo, ignoring the per-provider keys
+  // below.
+  "enable_all_acp_models": false,
+
+  // Per-provider switches. These apply when enable_acp_models is true and
+  // enable_all_acp_models is false.
+  //
+  // If NONE of the four are set, all four providers load. As soon as at least
+  // one is set, the unset ones stay off — so "enable_cursor_acp_models": true
+  // on its own enables only Cursor.
+  "enable_cursor_acp_models": true,
+  "enable_codex_acp_models": true,
+  "enable_claude_acp_models": true,
+  "enable_rovo_acp_models": true
+
+  // Fast-startup example — load nothing by default and opt in per shell using
+  // the env toggles:
+  //
+  //   { "enable_acp_models": false }
+  //
+  // Env overrides beat everything above, one variable per provider:
+  //   ENABLE_CURSOR_ACP  ENABLE_CODEX_ACP  ENABLE_CLAUDE_ACP  ENABLE_ROVO_ACP
+  // Any value other than "0" or "false" force-enables that provider even when
+  // it is disabled here; "0" or "false" force-disables it.
+  //
+  //   ENABLE_CODEX_ACP=1 pi     # load Codex models even with everything off
+  //
+  // Run /acp-config inside Pi to see what was resolved and what it cost.
+}

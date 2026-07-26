@@ -44,6 +44,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { acpProviderGate } from "./acp-lib/config.ts";
 
 const PROVIDER = "claude-code-acp";
 const API = "claude-code-acp";
@@ -681,6 +682,9 @@ function streamClaudeProvider(model: Model<any>, context: Context, options?: Sim
 }
 
 export default async function claudeCodeAcpExtension(pi: ExtensionAPI) {
+	const gate = acpProviderGate(pi, "claude");
+	if (!gate.enabled) return;
+
 	let models: ClaudeModelInfo[];
 	try {
 		models = await discoverClaudeModels();
@@ -709,6 +713,7 @@ export default async function claudeCodeAcpExtension(pi: ExtensionAPI) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 	});
+	gate.loaded(models.length);
 
 	pi.on("session_start", async (_event, ctx) => {
 		boundPiSessionKey = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();

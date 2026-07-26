@@ -34,6 +34,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { acpProviderGate } from "./acp-lib/config.ts";
 
 const PROVIDER = "codex-app-server";
 const API = "codex-app-server";
@@ -660,6 +661,9 @@ function formatCommand(command: unknown): string {
 }
 
 export default async function codexAppServerExtension(pi: ExtensionAPI) {
+	const gate = acpProviderGate(pi, "codex");
+	if (!gate.enabled) return;
+
 	let models: CodexModelInfo[];
 	try {
 		models = await discoverCodexModels();
@@ -668,9 +672,11 @@ export default async function codexAppServerExtension(pi: ExtensionAPI) {
 		console.error(
 			`[codex-app-server] failed to discover Codex models: ${error instanceof Error ? error.message : String(error)}`,
 		);
+		gate.failed(error);
 	}
 	if (models.length === 0) {
 		console.error("[codex-app-server] no Codex models discovered; provider not registered.");
+		gate.failed(new Error("no Codex models discovered"));
 		return;
 	}
 
@@ -695,6 +701,7 @@ export default async function codexAppServerExtension(pi: ExtensionAPI) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 	});
+	gate.loaded(variants.length);
 
 	pi.on("session_start", async (_event, ctx) => {
 		boundPiSessionKey = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
