@@ -353,7 +353,13 @@ class ClaudeAcpProcess {
 		const { command, args } = resolveClaudeAcpCommand();
 		this.child = spawn(command, args, {
 			cwd,
-			env: process.env,
+			// The ACP agent talks to Claude through the Claude Agent SDK, which —
+			// unlike the interactive CLI — honours ANTHROPIC_API_KEY without asking.
+			// A key exported in a shell profile therefore bills the pay-as-you-go API
+			// instead of the Claude subscription, and fails with "Credit balance is
+			// too low" when that account has no credits. Drop it so Claude Code uses
+			// the credentials from `claude login`.
+			env: { ...process.env, ANTHROPIC_API_KEY: undefined },
 			stdio: "pipe",
 		});
 		this.child.stderr.setEncoding("utf8");
