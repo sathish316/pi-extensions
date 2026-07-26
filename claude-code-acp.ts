@@ -57,8 +57,18 @@ const DEFAULT_MODEL_ID = "sonnet";
 
 const require = createRequire(import.meta.url);
 
+/**
+ * One entry in Pi's model picker. Claude Code exposes model and effort as two
+ * independent session config options, but Pi has no per-model effort selector,
+ * so we flatten the pair into virtual models the way codex-app-server does:
+ * `id` is what Pi sees, `modelId` + `effort` is what we send over ACP.
+ */
 type ClaudeModelInfo = {
 	id: string;
+	/** The ACP `model` config value this variant selects. */
+	modelId: string;
+	/** The ACP `effort` config value, or null to leave the agent's default. */
+	effort: string | null;
 	displayName: string;
 	description?: string;
 	reasoning: boolean;
@@ -202,6 +212,8 @@ function modelFallbacks(): ClaudeModelInfo[] {
 		] as const
 	).map(({ id, label, description }) => ({
 		id,
+		modelId: id,
+		effort: null,
 		displayName: `${label} [claude-code-acp]`,
 		description,
 		reasoning: isReasoningModel(id),
@@ -216,20 +228,60 @@ function flattenSelectOptions(option: SessionConfigOption): SessionConfigSelectO
 	return options.flatMap((item) => ("value" in item ? [item] : item.options));
 }
 
-function modelOptionValues(configOptions?: SessionConfigOption[] | null): ClaudeModelInfo[] {
-	const modelOption = configOptions?.find((option) => option.id === "model");
-	if (!modelOption || modelOption.type !== "select") return [];
+function selectOptionValues(configOptions: SessionConfigOption[] | null | undefined, id: string): SessionConfigSelectOption[] {
+	const option = configOptions?.find((candidate) => candidate.id === id);
+	if (!option || option.type !== "select") return [];
+	return flattenSelectOptions(option).filter((entry) => Boolean(entry.value));
+}
 
-	return flattenSelectOptions(modelOption)
-		.map((option) => ({
-			id: option.value,
-			displayName: `${option.name ?? option.value} [claude-code-acp]`,
-			description: option.description ?? undefined,
-			reasoning: isReasoningModel(option.value),
-			contextWindow: contextWindowFor(option.value, option.description ?? undefined),
-			maxTokens: maxTokensFor(option.value),
-		}))
-		.filter((model) => Boolean(model.id));
+/**
+ * Human label for a model option.
+ *
+ * Claude Code writes descriptions like "Opus 5 with 1M context · Best for
+ * everyday, complex tasks", so the clause before the "·" names the actual model
+ * version. Preferring it over `option.name` ("Opus (1M context)") is what makes
+ * two versions of the same tier — an Opus 4.8 entry and an Opus 5 entry —
+ * distinguishable in the picker rather than both reading "Opus".
+ */
+function modelLabel(option: SessionConfigSelectOption): string {
+	const fromDescription = option.description?.split("·")[0]?.trim();
+	const base = fromDescription || option.name || option.value;
+	// `default` shares its description with the model it currently points at,
+	// so qualify it or the two entries read identically.
+	return option.value === "default" ? `Default (${base})` : base;
+}
+
+/**
+ * Expand one ACP model option into one Pi model per supported effort level.
+ *
+ * The agent reports effort support per model (Haiku advertises none), so the
+ * caller passes the effort values it read back after selecting this model. The
+ * agent's own "default" effort maps to the bare model id — that keeps the
+ * pre-existing ids (`opus[1m]`, `sonnet`) working for anyone who already has
+ * one selected, and gives every other level a suffixed sibling.
+ */
+function createModelVariants(option: SessionConfigSelectOption, efforts: string[]): ClaudeModelInfo[] {
+	const label = modelLabel(option);
+	const description = option.description ?? undefined;
+	const contextWindow = contextWindowFor(option.value, description);
+	const maxTokens = maxTokensFor(option.value);
+	const levels = efforts.length > 0 ? efforts : ["default"];
+
+	return levels.map((effort) => {
+		const pinned = effort !== "default";
+		return {
+			id: pinned ? `${option.value}-${effort}` : option.value,
+			modelId: option.value,
+			effort: pinned ? effort : null,
+			displayName: `${label}${pinned ? ` · ${effort} effort` : ""} [claude-code-acp]`,
+			description,
+			// Effort is fixed by the virtual model; Pi's separate thinking
+			// selector must not override it.
+			reasoning: pinned ? false : isReasoningModel(option.value),
+			contextWindow,
+			maxTokens,
+		};
+	});
 }
 
 function chooseOptionId(params: RequestPermissionRequest, allowed: boolean): string | undefined {
@@ -415,6 +467,20 @@ class ClaudeAcpProcess {
 		);
 	}
 
+	/** Set a config option and return the agent's refreshed option list. */
+	async setConfigOptionAndRead(
+		sessionId: string,
+		configId: string,
+		value: string,
+	): Promise<SessionConfigOption[]> {
+		const response = await this.withTimeout(
+			Promise.resolve(this.agent!.setSessionConfigOption?.({ sessionId, configId, value })),
+			STARTUP_TIMEOUT_MS,
+			`session/set_config_option:${configId}`,
+		);
+		return (response as { configOptions?: SessionConfigOption[] } | undefined)?.configOptions ?? [];
+	}
+
 	async setConfigOption(sessionId: string, configId: string, value: string): Promise<void> {
 		await this.withTimeout(
 			Promise.resolve(this.agent!.setSessionConfigOption?.({ sessionId, configId, value })).then(() => undefined),
@@ -471,6 +537,9 @@ class ClaudeAcpBridge {
 	private acp: ClaudeAcpProcess | null = null;
 	private sessionId: string | null = null;
 	private currentModelId: string | null = null;
+	private currentEffort: string | null = null;
+	/** The Pi model id last applied, so a session reset can restore model + effort together. */
+	private currentVariantId: string | null = null;
 	private cwd: string | null = null;
 	private piSessionKey: string | null = null;
 	private sentMessageCount = 0;
@@ -486,6 +555,8 @@ class ClaudeAcpBridge {
 			connected: this.acp != null && !this.acp.isClosed(),
 			claudeSessionId: this.sessionId,
 			currentModelId: this.currentModelId,
+			currentEffort: this.currentEffort,
+			currentVariantId: this.currentVariantId,
 			sentMessageCount: this.sentMessageCount,
 			piSessionKey: this.piSessionKey,
 			cwd: this.cwd,
@@ -505,7 +576,7 @@ class ClaudeAcpBridge {
 		if (this.acp?.isClosed()) {
 			this.acp = null;
 			this.sessionId = null;
-			this.currentModelId = null;
+			this.clearModelState();
 		}
 
 		if (this.piSessionKey !== piSessionKey || this.cwd !== cwd) {
@@ -524,16 +595,41 @@ class ClaudeAcpBridge {
 		}
 	}
 
-	private async applyModel(modelId: string): Promise<void> {
-		if (!this.acp || !this.sessionId || this.currentModelId === modelId) return;
-		await this.acp.setConfigOption(this.sessionId, "model", modelId);
-		this.currentModelId = modelId;
+	/**
+	 * Resolve a Pi model id to its ACP model + effort pair and apply both.
+	 * Effort must be set after the model: the agent recomputes the effort ladder
+	 * per model, so setting it first can be dropped as invalid for the old model.
+	 */
+	private async applyModel(variantId: string): Promise<void> {
+		if (!this.acp || !this.sessionId) return;
+		const variant = modelCatalog.get(variantId);
+		const modelId = variant?.modelId ?? variantId;
+		const effort = variant?.effort ?? null;
+		if (this.currentModelId === modelId && this.currentEffort === effort) return;
+
+		if (this.currentModelId !== modelId) {
+			await this.acp.setConfigOption(this.sessionId, "model", modelId);
+			this.currentModelId = modelId;
+			// Selecting a model resets the agent's effort to that model's default.
+			this.currentEffort = null;
+		}
+		if (effort && this.currentEffort !== effort) {
+			await this.acp.setConfigOption(this.sessionId, "effort", effort);
+		}
+		this.currentEffort = effort;
+		this.currentVariantId = variantId;
 	}
 
-	async ensureModel(modelId: string, piSessionKey: string, cwd: string): Promise<void> {
+	private clearModelState(): void {
+		this.currentModelId = null;
+		this.currentEffort = null;
+		this.currentVariantId = null;
+	}
+
+	async ensureModel(variantId: string, piSessionKey: string, cwd: string): Promise<void> {
 		return this.runExclusive(async () => {
 			await this.ensureSession(piSessionKey, cwd);
-			await this.applyModel(modelId);
+			await this.applyModel(variantId);
 		});
 	}
 
@@ -544,9 +640,9 @@ class ClaudeAcpBridge {
 			const session = await this.acp.newSession(this.cwd);
 			this.sessionId = session.sessionId as string;
 			this.sentMessageCount = 0;
-			const previousModel = this.currentModelId;
-			this.currentModelId = null;
-			if (previousModel) await this.applyModel(previousModel);
+			const previousVariant = this.currentVariantId;
+			this.clearModelState();
+			if (previousVariant) await this.applyModel(previousVariant);
 		});
 	}
 
@@ -570,7 +666,7 @@ class ClaudeAcpBridge {
 		this.acp?.dispose();
 		this.acp = null;
 		this.sessionId = null;
-		this.currentModelId = null;
+		this.clearModelState();
 		this.cwd = null;
 		this.piSessionKey = null;
 		this.sentMessageCount = 0;
@@ -588,9 +684,38 @@ async function discoverClaudeModels(): Promise<ClaudeModelInfo[]> {
 	try {
 		await acp.initialize();
 		const session = await acp.newSession(process.cwd());
-		const discovered = modelOptionValues(session.configOptions);
-		if (discovered.length > 0) return discovered;
-		return modelFallbacks();
+		const sessionId = session.sessionId as string;
+		const modelOptions = selectOptionValues(session.configOptions, "model");
+		if (modelOptions.length === 0) return modelFallbacks();
+
+		// Effort support is per-model ("Available effort levels for this model"),
+		// so selecting each model is the only way to learn its ladder. Each round
+		// trip is a local call to the already-running agent; the expensive part of
+		// discovery is the process spawn we have already paid for.
+		const discovered: ClaudeModelInfo[] = [];
+		const seen = new Set<string>();
+		for (const option of modelOptions) {
+			let efforts: string[] = [];
+			try {
+				const refreshed = await acp.setConfigOptionAndRead(sessionId, "model", option.value);
+				efforts = selectOptionValues(refreshed, "effort").map((entry) => entry.value);
+			} catch (error) {
+				// A model whose effort list we cannot read still works at its default.
+				if (DEBUG) {
+					console.error(
+						`[claude-code-acp] effort probe failed for ${option.value}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+			for (const variant of createModelVariants(option, efforts)) {
+				if (seen.has(variant.id)) continue;
+				seen.add(variant.id);
+				discovered.push(variant);
+			}
+		}
+		return discovered.length > 0 ? discovered : modelFallbacks();
 	} finally {
 		acp.dispose();
 	}
@@ -763,6 +888,8 @@ export default async function claudeCodeAcpExtension(pi: ExtensionAPI) {
 				`connected: ${s.connected ? "yes" : "no"}`,
 				`claude session: ${s.claudeSessionId ?? "(none)"}`,
 				`current model: ${s.currentModelId ?? "(none)"}`,
+				`current effort: ${s.currentEffort ?? "(model default)"}`,
+				`selected variant: ${s.currentVariantId ?? "(none)"}`,
 				`messages sent: ${s.sentMessageCount}`,
 				`pi session key: ${s.piSessionKey ?? "(none)"}`,
 				`cwd: ${s.cwd ?? "(none)"}`,
