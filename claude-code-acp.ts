@@ -164,47 +164,50 @@ function incrementalPrompt(
 	return { text: formatMessages(delta), newSentCount: messages.length };
 }
 
-function contextWindowFor(modelId: string): number {
-	if (/opus-4|sonnet-4|haiku-4|opus|sonnet|haiku/i.test(modelId)) return 200_000;
+/**
+ * Model metadata is derived from the option IDs Claude Code advertises through
+ * `session/new` — currently `default`, `opus[1m]`, `claude-fable-5[1m]`,
+ * `sonnet`, `sonnet[1m]`, and `haiku`. A `[1m]` suffix marks the 1M-context
+ * variant; `default` is whichever model Claude Code recommends (Opus today).
+ */
+function contextWindowFor(modelId: string, description?: string): number {
+	// `default` carries no [1m] suffix but currently maps to a 1M-context model,
+	// so trust the advertised description when the id alone doesn't say.
+	if (/\[1m\]/i.test(modelId) || /fable/i.test(modelId)) return 1_000_000;
+	if (description && /\b1M context\b/i.test(description)) return 1_000_000;
 	return 200_000;
 }
 
 function maxTokensFor(modelId: string): number {
-	if (/haiku/i.test(modelId)) return 8192;
-	return 32_768;
+	if (/haiku/i.test(modelId)) return 64_000;
+	return 128_000;
 }
 
 function isReasoningModel(modelId: string): boolean {
 	return !/haiku/i.test(modelId);
 }
 
+/**
+ * Used only when discovery fails. These are Claude Code's stable aliases, so
+ * they keep resolving to whatever each tier currently points at rather than
+ * pinning a model version that will age out.
+ */
 function modelFallbacks(): ClaudeModelInfo[] {
-	return [
-		{
-			id: "opus",
-			displayName: "Opus [claude-code-acp]",
-			description: "Claude Code Opus alias",
-			reasoning: true,
-			contextWindow: 200_000,
-			maxTokens: 32_768,
-		},
-		{
-			id: "sonnet",
-			displayName: "Sonnet [claude-code-acp]",
-			description: "Claude Code Sonnet alias",
-			reasoning: true,
-			contextWindow: 200_000,
-			maxTokens: 32_768,
-		},
-		{
-			id: "haiku",
-			displayName: "Haiku [claude-code-acp]",
-			description: "Claude Code Haiku alias",
-			reasoning: false,
-			contextWindow: 200_000,
-			maxTokens: 8192,
-		},
-	];
+	return (
+		[
+			{ id: "default", label: "Default", description: "Claude Code's recommended model" },
+			{ id: "opus[1m]", label: "Opus (1M context)", description: "Claude Code Opus alias" },
+			{ id: "sonnet", label: "Sonnet", description: "Claude Code Sonnet alias" },
+			{ id: "haiku", label: "Haiku", description: "Claude Code Haiku alias" },
+		] as const
+	).map(({ id, label, description }) => ({
+		id,
+		displayName: `${label} [claude-code-acp]`,
+		description,
+		reasoning: isReasoningModel(id),
+		contextWindow: contextWindowFor(id),
+		maxTokens: maxTokensFor(id),
+	}));
 }
 
 function flattenSelectOptions(option: SessionConfigOption): SessionConfigSelectOption[] {
@@ -223,7 +226,7 @@ function modelOptionValues(configOptions?: SessionConfigOption[] | null): Claude
 			displayName: `${option.name ?? option.value} [claude-code-acp]`,
 			description: option.description ?? undefined,
 			reasoning: isReasoningModel(option.value),
-			contextWindow: contextWindowFor(option.value),
+			contextWindow: contextWindowFor(option.value, option.description ?? undefined),
 			maxTokens: maxTokensFor(option.value),
 		}))
 		.filter((model) => Boolean(model.id));
@@ -404,14 +407,17 @@ class ClaudeAcpProcess {
 	}
 
 	async newSession(cwd = this.cwd): Promise<any> {
-		return this.withTimeout(this.agent!.newSession({ cwd, mcpServers: [] }), STARTUP_TIMEOUT_MS, "session/new");
+		// ACP SDK 1.x types these as MaybePromise, so normalise before racing a timeout.
+		return this.withTimeout(
+			Promise.resolve(this.agent!.newSession({ cwd, mcpServers: [] })),
+			STARTUP_TIMEOUT_MS,
+			"session/new",
+		);
 	}
 
 	async setConfigOption(sessionId: string, configId: string, value: string): Promise<void> {
 		await this.withTimeout(
-			(this.agent!.setSessionConfigOption?.({ sessionId, configId, value }) ?? Promise.resolve()).then(
-				() => undefined,
-			),
+			Promise.resolve(this.agent!.setSessionConfigOption?.({ sessionId, configId, value })).then(() => undefined),
 			STARTUP_TIMEOUT_MS,
 			`session/set_config_option:${configId}`,
 		);
@@ -425,7 +431,7 @@ class ClaudeAcpProcess {
 		signal?.addEventListener("abort", abort, { once: true });
 		try {
 			return await this.withTimeout(
-				this.agent!.prompt({ sessionId, prompt }),
+				Promise.resolve(this.agent!.prompt({ sessionId, prompt })),
 				REQUEST_TIMEOUT_MS,
 				"session/prompt",
 			);
@@ -435,7 +441,7 @@ class ClaudeAcpProcess {
 	}
 
 	async closeSession(sessionId: string): Promise<void> {
-		await this.agent?.closeSession?.({ sessionId }).catch(() => undefined);
+		await Promise.resolve(this.agent?.closeSession?.({ sessionId })).catch(() => undefined);
 	}
 
 	dispose(): void {
